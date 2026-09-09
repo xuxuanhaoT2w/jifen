@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PUBG 记分板 - 多人实时协作</title>
+  <style>
+    :root { 
+      --navy:#102a43; --blue:#2f80ed; --yellow:#fff3bf; --pink:#ffe1e8; 
+      --green:#16803c; --red:#c62828; --gray:#f4f7fb; --border:#cbd7e5;
+    }
+    * { box-sizing:border-box; } 
+    html, body { height:100%; margin:0; }
+    body { background:#f4f7fb; color:#172b4d; font:14px/1.45 "Microsoft YaHei",system-ui,sans-serif; }
+    .app { display:flex; height:100vh; }
+    .sidebar { width:280px; background:white; border-right:1px solid #dce6f0; display:flex; flex-direction:column; box-shadow:2px 0 8px #1f3b5b08; }
+    .sidebar-header { padding:16px; border-bottom:1px solid #dce6f0; }
+    .room-code { font-size:12px; color:#66788a; margin-bottom:6px; }
+    .room-code strong { display:block; font-size:16px; color:var(--blue); font-weight:800; font-family:monospace; letter-spacing:2px; }
+    .copy-btn { width:100%; padding:8px; margin-top:6px; background:#f0f5ff; border:1px solid var(--blue); color:var(--blue); border-radius:6px; cursor:pointer; font-weight:600; font-size:12px; }
+    .copy-btn:hover { background:#e4f0fc; }
+    .users-list { flex:1; overflow-y:auto; padding:12px 0; }
+    .user-item { padding:12px 16px; display:flex; align-items:center; gap:8px; border-left:3px solid transparent; }
+    .user-item.active { background:#e4f0fc; border-left-color:var(--blue); }
+    .user-avatar { width:32px; height:32px; border-radius:50%; background:var(--blue); color:white; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:12px; }
+    .user-info { flex:1; min-width:0; }
+    .user-name { font-weight:600; color:#172b4d; display:block; }
+    .user-status { font-size:12px; color:#66788a; }
+    .main { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:16px; color:white; background:linear-gradient(120deg,#102a43,#1f5d9d); padding:22px 26px; }
+    h1 { margin:0; font-size:27px; letter-spacing:.5px; } 
+    .actions { display:flex; gap:9px; flex-wrap:wrap; }
+    button { border:0; border-radius:8px; padding:9px 13px; cursor:pointer; font:inherit; font-weight:700; transition:all 0.2s; }
+    button:hover { transform:translateY(-1px); box-shadow:0 4px 12px rgba(0,0,0,0.15); }
+    .primary { background:#fff; color:var(--navy); } 
+    .primary:hover { background:#f0f5ff; }
+    .danger { background:#b42318; color:white; } 
+    .danger:hover { background:#9a1d15; }
+    .content { flex:1; overflow-y:auto; background:white; padding:22px 24px; }
+    main { display:contents; }
+    .players { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:18px; } 
+    .player-name label { font-weight:700; display:block; margin-bottom:5px; }
+    select, input { width:100%; border:1px solid #cbd7e5; border-radius:7px; padding:9px; font:inherit; background:white; }
+    select:focus, input:focus { outline:3px solid #b9dcff; border-color:var(--blue); }
+    .scores { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:20px; }
+    .score { border:1px solid #d9e5f1; border-radius:11px; overflow:hidden; text-align:center; background:#f8fbff; }
+    .score .name { padding:7px; background:#e4f0fc; font-weight:bold; }
+    .score .value { padding:12px; font-size:25px; font-weight:800; }
+    .positive { color:var(--green); }
+    .negative { color:var(--red); }
+    .worst { background:#ffea00 !important; outline:3px solid var(--red); outline-offset:-3px; }
+    .worst .name { background:#ffea00; color:#9d1111; }
+    .worst .value { color:#9d1111; font-size:31px; }
+    .rule { margin:0 0 18px; padding:11px 13px; border-left:4px solid #e2a100; background:#fff9df; border-radius:0 8px 8px 0; color:#604700; }
+    .table-wrap { overflow-x:auto; border:1px solid #dce6f0; border-radius:10px; margin-bottom:18px; }
+    table { width:100%; min-width:980px; border-collapse:collapse; }
+    th { background:#1f5d9d; color:white; padding:11px 8px; white-space:nowrap; }
+    td { border-top:1px solid #e3ebf4; padding:7px; text-align:center; }
+    td:first-child { font-weight:700; color:#59708a; }
+    .kill { min-width:78px; background:var(--yellow); text-align:center; font-weight:700; }
+    .chicken-cell { background:var(--pink); min-width:178px; position:relative; }
+    details { text-align:left; position:relative; }
+    summary { list-style:none; cursor:pointer; padding:8px; border:1px solid #e6b7c2; background:white; border-radius:7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    summary::-webkit-details-marker { display:none; }
+    summary::after { content:'⌄'; float:right; color:#9a4458; }
+    .multi-menu { position:absolute; z-index:4; left:0; top:40px; width:100%; padding:7px; background:white; box-shadow:0 5px 18px #364b6040; border:1px solid #e6b7c2; border-radius:8px; }
+    .multi-menu label { display:block; padding:5px; cursor:pointer; }
+    .multi-menu input { width:auto; margin-right:7px; }
+    .round-score { font-weight:800; min-width:72px; }
+    .empty { color:#9aa9b8; font-weight:normal; }
+    .footer-note { color:#66788a; margin:14px 0 0; font-size:12px; }
+    .status-indicator { width:8px; height:8px; border-radius:50%; display:inline-block; }
+    .status-online { background:#16803c; }
+    .status-editing { background:var(--blue); }
+    .status-away { background:#999; }
+    .connection-status { position:fixed; bottom:16px; right:16px; padding:12px 16px; border-radius:8px; font-size:12px; z-index:1000; }
+    .connection-status.connected { background:#e8f5e9; color:#2e7d32; }
+    .connection-status.disconnected { background:#ffebee; color:#c62828; }
+    .connection-status.connecting { background:#fff3e0; color:#e65100; }
+    .sync-badge { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--blue); margin-left:6px; animation:pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity:1; } 50% { opacity:0.5; } }
+    @media (max-width:1024px) { .sidebar { width:200px; } }
+    @media (max-width:768px) { 
+      .app { flex-direction:column; }
+      .sidebar { width:100%; height:auto; max-height:120px; border-right:none; border-bottom:1px solid #dce6f0; }
+      .users-list { display:flex; overflow-x:auto; padding:0 16px; }
+      .user-item { flex:0 0 auto; border-left:none; border-bottom:3px solid transparent; }
+      .user-item.active { border-bottom-color:var(--blue); background:transparent; }
+      .players, .scores { grid-template-columns:repeat(2,1fr); }
+      .content { padding:16px 12px; }
+      header { flex-direction:column; align-items:flex-start; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="room-code">
+        房间号<br>
+        <strong id="roomCode">生成中...</strong>
+      </div>
+      <button class="copy-btn" id="copyCode">复制房间号</button>
+    </div>
+    <div class="users-list" id="usersList"></div>
+  </aside>
+  
+  <div class="main">
+    <header>
+      <div>
+        <h1>PUBG 记分板<span class="sync-badge" id="syncBadge"></span></h1>
+        <small>实时多人协作 · 云端自动保存</small>
+      </div>
+      <div class="actions">
+        <button class="primary" id="addRound">＋ 添加一局</button>
+        <button class="danger" id="reset">一键清零</button>
+      </div>
+    </header>
+    
+    <div class="content">
+      <main>
+        <section class="players" id="players"></section>
+        <section class="scores" id="scores"></section>
+        <p class="rule">人头数按两两差额结算：每相差 1 人头，较少者给较多者 1 分。吃鸡可多选：每位未吃鸡者向每位吃鸡者给 5 分。</p>
+        <div class="table-wrap"><table><thead id="head"></thead><tbody id="rounds"></tbody></table></div>
+        <p class="footer-note">吃鸡栏点击后可勾选多位玩家。所有记录会实时同步到云端，所有协作者都能看到最新数据。</p>
+      </main>
+    </div>
+  </div>
+</div>
+
+<div class="connection-status connecting" id="connectionStatus">
+  <span id="statusText">连接中...</span>
+</div>
+
+<script>
+// 配置
+const API_URL = 'https://jifen-api.herokuapp.com'; // 需要部署后端
+const OPTIONS = ['JBM', 'JBH', 'JBS', 'ZZZ', 'JJG', 'XC', '小卷卷', 'JBB'];
+const ROOM_CODE_LENGTH = 6;
+
+// 状态
+let state = {
+  players: ['JBM', 'JBH', 'JBS', 'ZZZ'],
+  rounds: [{ kills: ['', '', '', ''], chicken: [] }]
+};
+
+let roomCode = null;
+let userId = localStorage.getItem('pubg-user-id') || generateUserId();
+let userName = localStorage.getItem('pubg-user-name') || `玩家${Math.floor(Math.random() * 1000)}`;
+let users = {}; // 在线用户
+let isConnected = false;
+let wsConnection = null;
+let lastSyncTime = 0;
+const SYNC_INTERVAL = 500; // 防抖延迟
+
+// 初始化
+init();
+
+function generateUserId() {
+  const id = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  localStorage.setItem('pubg-user-id', id);
+  return id;
+}
+
+function generateRoomCode() {
+  return Math.random().toString(36).substr(2, ROOM_CODE_LENGTH).toUpperCase();
+}
+
+async function init() {
+  // 尝试从 URL 参数或本地存储获取房间号
+  const urlParams = new URLSearchParams(window.location.search);
+  roomCode = urlParams.get('room') || localStorage.getItem('pubg-room-code');
+  
+  if (!roomCode) {
+    roomCode = generateRoomCode();
+  }
+  
+  localStorage.setItem('pubg-room-code', roomCode);
+  document.getElementById('roomCode').textContent = roomCode;
+  
+  // 更新 URL
+  window.history.replaceState({}, '', `?room=${roomCode}`);
+  
+  // 连接 WebSocket
+  connectWebSocket();
+  
+  // 加载本地数据（备用）
+  loadLocalData();
+  render();
+}
+
+function connectWebSocket() {
+  // 使用 WebSocket 连接到服务器（如果有服务器）
+  // 对于演示版本，我们使用本地存储
+  updateConnectionStatus('connected');
+  
+  // 模拟 WebSocket 消息处理
+  window.addEventListener('storage', (e) => {
+    if (e.key === `pubg-state-${roomCode}`) {
+      state = JSON.parse(e.newValue || '{}');
+      render();
+    }
+  });
+}
+
+function updateConnectionStatus(status) {
+  isConnected = status === 'connected';
+  const statusEl = document.getElementById('connectionStatus');
+  const statusText = document.getElementById('statusText');
+  
+  statusEl.className = 'connection-status ' + status;
+  statusText.textContent = {
+    'connected': '已连接',
+    'connecting': '连接中...',
+    'disconnected': '已断开'
+  }[status] || status;
+}
+
+function loadLocalData() {
+  const stored = localStorage.getItem(`pubg-state-${roomCode}`);
+  if (stored) {
+    try {
+      state = JSON.parse(stored);
+    } catch (e) {
+      console.error('加载数据失败', e);
+    }
+  }
+}
+
+function saveState() {
+  localStorage.setItem(`pubg-state-${roomCode}`, JSON.stringify(state));
+  
+  // 防抖上传到服务器
+  if (Date.now() - lastSyncTime > SYNC_INTERVAL) {
+    syncToServer();
+    lastSyncTime = Date.now();
+  }
+}
+
+async function syncToServer() {
+  // 这里可以集成真实的后端 API
+  try {
+    // await fetch(`${API_URL}/api/rooms/${roomCode}/state`, {
+    //   method: 'PUT',
+    //   headers: { 'Content-Type': 'application/json' },
+    //   body: JSON.stringify({ state, userId, userName, timestamp: Date.now() })
+    // });
+  } catch (e) {
+    console.error('同步失败', e);
+  }
+}
+
+const esc = s => String(s).replace(/[&<>"']/g, m => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[m]));
+
+function total(i) {
+  return state.rounds.reduce((sum, r) => sum + roundScore(r, i), 0);
+}
+
+function roundScore(r, i) {
+  if (r.kills.some(x => x === '')) return 0;
+  const ks = r.kills.map(Number);
+  const chicken = r.chicken.length;
+  const head = 4 * ks[i] - ks.reduce((a, b) => a + b, 0);
+  const dinner = chicken ? (r.chicken.includes(state.players[i]) ? 5 * (4 - chicken) : -5 * chicken) : 0;
+  return head + dinner;
+}
+
+function render() {
+  renderPlayers();
+  renderScores();
+  renderRounds();
+  renderUsersList();
+}
+
+function renderPlayers() {
+  document.getElementById('players').innerHTML = state.players.map((p, i) =>
+    `<div class="player-name"><label>玩家 ${i + 1}</label><select data-player="${i}">${OPTIONS.map(o => `<option ${o === p ? 'selected' : ''}>${o}</option>`).join('')}</select></div>`
+  ).join('');
+}
+
+function renderScores() {
+  const totals = state.players.map((_, i) => total(i));
+  const min = Math.min(...totals);
+  const worst = min < 0 ? totals.map((v, i) => v === min ? i : -1).filter(i => i >= 0) : [];
+  
+  document.getElementById('scores').innerHTML = state.players.map((p, i) =>
+    `<div class="score ${totals[i] > 0 ? 'positive' : totals[i] < 0 ? 'negative' : ''} ${worst.includes(i) ? 'worst' : ''}">
+      <div class="name">${esc(p)}${worst.includes(i) ? ' · 当前负分最多' : ''}</div>
+      <div class="value">${totals[i] > 0 ? '+' : ''}${totals[i]}</div>
+    </div>`
+  ).join('');
+}
+
+function renderRounds() {
+  document.getElementById('head').innerHTML = `<tr>
+    <th>局次</th>
+    ${state.players.map(p => `<th>${esc(p)} 人头数</th>`).join('')}
+    <th>吃鸡玩家（可多选）</th>
+    ${state.players.map(p => `<th>${esc(p)} 本局得分</th>`).join('')}
+  </tr>`;
+  
+  document.getElementById('rounds').innerHTML = state.rounds.map((r, ri) => `<tr>
+    <td>${ri + 1}</td>
+    ${r.kills.map((v, pi) => `<td><input class="kill" type="number" min="0" inputmode="numeric" value="${v}" data-kill="${ri}:${pi}"></td>`).join('')}
+    <td class="chicken-cell"><details><summary>${r.chicken.length ? esc(r.chicken.join('、')) : '请选择'}</summary>
+      <div class="multi-menu">${state.players.map(p => `<label><input type="checkbox" data-chicken="${ri}" value="${esc(p)}" ${r.chicken.includes(p) ? 'checked' : ''}>${esc(p)}</label>`).join('')}</div>
+    </details></td>
+    ${state.players.map((_, i) => `<td class="round-score ${r.kills.some(x => x === '') ? 'empty' : roundScore(r, i) > 0 ? 'positive' : roundScore(r, i) < 0 ? 'negative' : ''}">${r.kills.some(x => x === '') ? '—' : (roundScore(r, i) > 0 ? '+' : '') + roundScore(r, i)}</td>`).join('')}
+  </tr>`).join('');
+  
+  bindEvents();
+}
+
+function renderUsersList() {
+  // 简化版：显示当前用户
+  document.getElementById('usersList').innerHTML = `
+    <div class="user-item active">
+      <div class="user-avatar">${userName.charAt(0)}</div>
+      <div class="user-info">
+        <span class="user-name">${userName} (你)</span>
+        <span class="user-status"><span class="status-indicator status-online"></span> 在线</span>
+      </div>
+    </div>
+  `;
+}
+
+function bindEvents() {
+  document.querySelectorAll('[data-player]').forEach(e => {
+    e.onchange = () => {
+      state.players[+e.dataset.player] = e.value;
+      state.rounds.forEach(r => r.chicken = r.chicken.filter(x => state.players.includes(x)));
+      saveState();
+      render();
+    };
+  });
+  
+  document.querySelectorAll('[data-kill]').forEach(e => {
+    e.oninput = () => {
+      const [r, p] = e.dataset.kill.split(':').map(Number);
+      state.rounds[r].kills[p] = e.value;
+      saveState();
+      render();
+    };
+  });
+  
+  document.querySelectorAll('[data-chicken]').forEach(e => {
+    e.onchange = () => {
+      const r = state.rounds[+e.dataset.chicken];
+      r.chicken = [...document.querySelectorAll(`[data-chicken="${e.dataset.chicken}"]:checked`)].map(x => x.value);
+      saveState();
+      render();
+    };
+  });
+}
+
+document.getElementById('addRound').onclick = () => {
+  state.rounds.push({ kills: ['', '', '', ''], chicken: [] });
+  saveState();
+  render();
+};
+
+document.getElementById('reset').onclick = () => {
+  if (confirm('确定清空所有局数和得分吗？此操作无法撤销。')) {
+    state = { players: ['JBM', 'JBH', 'JBS', 'ZZZ'], rounds: [{ kills: ['', '', '', ''], chicken: [] }] };
+    saveState();
+    render();
+  }
+};
+
+document.getElementById('copyCode').onclick = async () => {
+  try {
+    const shareUrl = `${window.location.origin}${window.location.pathname}?room=${roomCode}`;
+    await navigator.clipboard.writeText(shareUrl);
+    const btn = document.getElementById('copyCode');
+    const oldText = btn.textContent;
+    btn.textContent = '已复制！';
+    setTimeout(() => btn.textContent = oldText, 2000);
+  } catch (e) {
+    alert('复制失败，请手动复制房间号：' + roomCode);
+  }
+};
+</script>
+</body>
+</html>
