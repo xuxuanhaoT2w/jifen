@@ -1,409 +1,67 @@
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
-const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ server, path: '/ws' });
+const PORT = Number(process.env.PORT || 3000);
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const ROOMS_FILE = path.join(DATA_DIR, 'rooms.json');
+const ROOM_CODE = /^[A-Z0-9]{4,12}$/;
+const PLAYER_OPTIONS = ['JBM', 'JBH', 'JBS', 'ZZZ', 'JJG', 'XC', '小卷卷', 'JBB'];
+const DEFAULT_PLAYERS = PLAYER_OPTIONS.slice(0, 4);
 
-app.use(cors());
-app.use(express.json());
-app.use(express.static('.'));
-
-// 数据文件路径
-const dataDir = path.join(__dirname, 'data');
-const roomsFile = path.join(dataDir, 'rooms.json');
-const historyDir = path.join(dataDir, 'history');
-
-// 初始化数据目录
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const rooms = new Map();
+function defaultState() { return { players: [...DEFAULT_PLAYERS], rounds: [{ kills: ['', '', '', ''], chicken: [] }] }; }
+function normaliseState(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const players = Array.isArray(source.players) && source.players.length === 4 ? source.players.map((name, index) => PLAYER_OPTIONS.includes(name) ? name : DEFAULT_PLAYERS[index]) : [...DEFAULT_PLAYERS];
+  const rounds = Array.isArray(source.rounds) ? source.rounds.slice(0, 500).map(round => {
+    const kills = Array.isArray(round && round.kills) ? round.kills.slice(0, 4) : [];
+    const safeKills = [...Array(4)].map((_, i) => { const value = kills[i]; if (value === '' || value === null || value === undefined) return ''; const number = Number(value); return Number.isInteger(number) && number >= 0 && number <= 999 ? String(number) : ''; });
+    const chicken = Array.isArray(round && round.chicken) ? [...new Set(round.chicken)] : [];
+    return { kills: safeKills, chicken: chicken.filter(name => players.includes(name)) };
+  }) : [];
+  return { players, rounds: rounds.length ? rounds : [{ kills: ['', '', '', ''], chicken: [] }] };
 }
-if (!fs.existsSync(historyDir)) {
-  fs.mkdirSync(historyDir, { recursive: true });
+function loadRooms() {
+  if (!fs.existsSync(ROOMS_FILE)) return;
+  try { const stored = JSON.parse(fs.readFileSync(ROOMS_FILE, 'utf8')); for (const [code, room] of Object.entries(stored)) if (ROOM_CODE.test(code)) rooms.set(code, { state: normaliseState(room.state), version: Number(room.version) || 0, createdAt: room.createdAt || new Date().toISOString(), updatedAt: room.updatedAt || new Date().toISOString(), users: new Map() }); }
+  catch (error) { console.error('无法读取房间数据：', error.message); }
 }
-
-// 房间数据存储（内存 + 文件持久化）
-let rooms = new Map();
-
-// 加载数据
-function loadData() {
-  if (fs.existsSync(roomsFile)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(roomsFile, 'utf8'));
-      Object.entries(data).forEach(([code, roomData]) => {
-        rooms.set(code, {
-          state: roomData.state,
-          users: new Map(),
-          matches: roomData.matches || [],
-          createdAt: roomData.createdAt
-        });
-      });
-      console.log(`已加载 ${rooms.size} 个房间`);
-    } catch (e) {
-      console.error('加载数据失败:', e);
-    }
-  }
-}
-
-// 保存数据
-function saveData() {
-  try {
-    const data = {};
-    rooms.forEach((room, code) => {
-      data[code] = {
-        state: room.state,
-        matches: room.matches,
-        createdAt: room.createdAt
-      };
-    });
-    fs.writeFileSync(roomsFile, JSON.stringify(data, null, 2));
-  } catch (e) {
-    console.error('保存数据失败:', e);
-  }
+function saveRooms() { const saved = {}; rooms.forEach((room, code) => { saved[code] = { state: room.state, version: room.version, createdAt: room.createdAt, updatedAt: room.updatedAt }; }); const temporary = `${ROOMS_FILE}.tmp`; fs.writeFileSync(temporary, JSON.stringify(saved, null, 2)); fs.renameSync(temporary, ROOMS_FILE); }
+function getRoom(code) { if (!rooms.has(code)) rooms.set(code, { state: defaultState(), version: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), users: new Map() }); return rooms.get(code); }
+function usersFor(room) { return [...room.users.entries()].map(([id, user]) => ({ id, name: user.name })); }
+function send(ws, message) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message)); }
+function broadcast(room, message) { room.users.forEach(user => send(user.ws, message)); }
+function broadcastState(room, updatedBy) { broadcast(room, { type: 'state', state: room.state, version: room.version, users: usersFor(room), updatedBy }); }
+function applyOperation(room, operation) {
+  const state = room.state;
+  if (!operation || typeof operation.type !== 'string') return false;
+  if (operation.type === 'set-player') { const index = Number(operation.index); if (!Number.isInteger(index) || index < 0 || index > 3 || !PLAYER_OPTIONS.includes(operation.name)) return false; const previous = state.players[index]; state.players[index] = operation.name; state.rounds.forEach(round => { round.chicken = round.chicken.map(name => name === previous ? operation.name : name).filter((name, i, values) => state.players.includes(name) && values.indexOf(name) === i); }); return true; }
+  if (operation.type === 'set-kill') { const roundIndex = Number(operation.roundIndex), playerIndex = Number(operation.playerIndex); if (!Number.isInteger(roundIndex) || !Number.isInteger(playerIndex) || !state.rounds[roundIndex] || playerIndex < 0 || playerIndex > 3) return false; const value = operation.value === '' ? '' : String(operation.value); if (value !== '' && (!/^\d+$/.test(value) || Number(value) > 999)) return false; state.rounds[roundIndex].kills[playerIndex] = value; return true; }
+  if (operation.type === 'set-chicken') { const roundIndex = Number(operation.roundIndex); if (!Number.isInteger(roundIndex) || !state.rounds[roundIndex] || !Array.isArray(operation.players)) return false; state.rounds[roundIndex].chicken = [...new Set(operation.players)].filter(name => state.players.includes(name)); return true; }
+  if (operation.type === 'add-round') { if (state.rounds.length >= 500) return false; state.rounds.push({ kills: ['', '', '', ''], chicken: [] }); return true; }
+  if (operation.type === 'reset') { room.state = defaultState(); return true; }
+  return false;
 }
 
-// WebSocket 连接处理
-wss.on('connection', (ws) => {
-  let roomCode = null;
-  let userId = null;
-  let userName = null;
-
-  ws.on('message', (data) => {
-    try {
-      const msg = JSON.parse(data);
-
-      // 加入房间
-      if (msg.type === 'join') {
-        roomCode = msg.roomCode;
-        userId = msg.userId;
-        userName = msg.userName;
-
-        if (!rooms.has(roomCode)) {
-          rooms.set(roomCode, {
-            state: {
-              players: ['JBM', 'JBH', 'JBS', 'ZZZ'],
-              rounds: [{ kills: ['', '', '', ''], chicken: [] }]
-            },
-            users: new Map(),
-            matches: [],
-            createdAt: new Date().toISOString()
-          });
-        }
-
-        const room = rooms.get(roomCode);
-        room.users.set(userId, { name: userName, ws });
-
-        // 发送当前房间状态给新加入的用户
-        ws.send(JSON.stringify({
-          type: 'state',
-          state: room.state,
-          matches: room.matches,
-          users: Array.from(room.users.values()).map(u => ({
-            id: Array.from(room.users.entries()).find(([_, v]) => v === u)[0],
-            name: u.name
-          }))
-        }));
-
-        // 通知房间内其他用户有新用户加入
-        broadcastToRoom(roomCode, {
-          type: 'user-joined',
-          userId,
-          userName
-        }, userId);
-
-        saveData();
-      }
-
-      // 状态更新
-      if (msg.type === 'update' && roomCode) {
-        const room = rooms.get(roomCode);
-        if (room) {
-          room.state = msg.state;
-          // 广播给房间内所有用户
-          broadcastToRoom(roomCode, {
-            type: 'state',
-            state: room.state,
-            updatedBy: userName
-          });
-          saveData();
-        }
-      }
-
-      // 保存比赛
-      if (msg.type === 'save-match' && roomCode) {
-        const room = rooms.get(roomCode);
-        if (room) {
-          const match = {
-            id: Date.now(),
-            timestamp: new Date().toISOString(),
-            state: msg.state,
-            title: msg.title || `比赛 ${room.matches.length + 1}`,
-            scores: msg.scores || {}
-          };
-          room.matches.push(match);
-          
-          // 保存到历史文件
-          const historyFile = path.join(historyDir, `${roomCode}_${match.id}.json`);
-          fs.writeFileSync(historyFile, JSON.stringify(match, null, 2));
-
-          broadcastToRoom(roomCode, {
-            type: 'match-saved',
-            match
-          });
-
-          saveData();
-        }
-      }
-
-      // 获取历史比赛列表
-      if (msg.type === 'get-history' && roomCode) {
-        const room = rooms.get(roomCode);
-        if (room) {
-          ws.send(JSON.stringify({
-            type: 'history',
-            matches: room.matches
-          }));
-        }
-      }
-
-      // 加载历史比赛
-      if (msg.type === 'load-match' && roomCode) {
-        const room = rooms.get(roomCode);
-        if (room) {
-          const match = room.matches.find(m => m.id === msg.matchId);
-          if (match) {
-            ws.send(JSON.stringify({
-              type: 'match-loaded',
-              match
-            }));
-          }
-        }
-      }
-
-      // 删除比赛
-      if (msg.type === 'delete-match' && roomCode) {
-        const room = rooms.get(roomCode);
-        if (room) {
-          const index = room.matches.findIndex(m => m.id === msg.matchId);
-          if (index !== -1) {
-            const match = room.matches.splice(index, 1)[0];
-            
-            // 删除历史文件
-            const historyFile = path.join(historyDir, `${roomCode}_${match.id}.json`);
-            if (fs.existsSync(historyFile)) {
-              fs.unlinkSync(historyFile);
-            }
-
-            broadcastToRoom(roomCode, {
-              type: 'match-deleted',
-              matchId: msg.matchId
-            });
-
-            saveData();
-          }
-        }
-      }
-
-      // 用户列表更新
-      if (msg.type === 'list' && roomCode) {
-        const room = rooms.get(roomCode);
-        if (room) {
-          broadcastToRoom(roomCode, {
-            type: 'users',
-            users: Array.from(room.users.values()).map((u, idx) => ({
-              id: Array.from(room.users.keys())[idx],
-              name: u.name
-            }))
-          });
-        }
-      }
-    } catch (e) {
-      console.error('消息处理错误:', e);
-    }
+app.disable('x-powered-by');
+app.use(express.json({ limit: '32kb' }));
+app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html' }));
+app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+wss.on('connection', ws => {
+  let room = null, userId = null;
+  ws.on('message', raw => {
+    let message; try { message = JSON.parse(raw); } catch { return send(ws, { type: 'error', message: '消息格式无效' }); }
+    if (message.type === 'join') { const code = String(message.roomCode || '').trim().toUpperCase(); const name = String(message.userName || '访客').trim().slice(0, 24) || '访客'; userId = String(message.userId || '').slice(0, 80); if (!ROOM_CODE.test(code) || !userId) return send(ws, { type: 'error', message: '房间号无效' }); room = getRoom(code); room.users.set(userId, { name, ws }); send(ws, { type: 'state', state: room.state, version: room.version, users: usersFor(room) }); broadcast(room, { type: 'users', users: usersFor(room) }); saveRooms(); return; }
+    if (message.type === 'operation' && room && applyOperation(room, message.operation)) { room.version += 1; room.updatedAt = new Date().toISOString(); saveRooms(); broadcastState(room, room.users.get(userId)?.name || '访客'); }
   });
-
-  ws.on('close', () => {
-    if (roomCode) {
-      const room = rooms.get(roomCode);
-      if (room) {
-        room.users.delete(userId);
-        // 通知房间内其他用户
-        broadcastToRoom(roomCode, {
-          type: 'user-left',
-          userId,
-          userName
-        });
-        // 如果房间为空，保留房间数据但清理内存
-        if (room.users.size === 0) {
-          // 可选：保留房间数据以便后续恢复
-        }
-      }
-    }
-  });
+  ws.on('close', () => { if (room && userId) { room.users.delete(userId); broadcast(room, { type: 'users', users: usersFor(room) }); } });
 });
-
-// 广播到房间内所有用户
-function broadcastToRoom(roomCode, message, excludeUserId = null) {
-  const room = rooms.get(roomCode);
-  if (!room) return;
-
-  room.users.forEach((user, userId) => {
-    if (excludeUserId !== userId && user.ws.readyState === WebSocket.OPEN) {
-      user.ws.send(JSON.stringify(message));
-    }
-  });
-}
-
-// REST API 接口
-app.get('/api/rooms/:roomCode/state', (req, res) => {
-  const { roomCode } = req.params;
-  const room = rooms.get(roomCode);
-  if (room) {
-    res.json({
-      state: room.state,
-      matches: room.matches
-    });
-  } else {
-    res.json({
-      state: {
-        players: ['JBM', 'JBH', 'JBS', 'ZZZ'],
-        rounds: [{ kills: ['', '', '', ''], chicken: [] }]
-      },
-      matches: []
-    });
-  }
-});
-
-app.put('/api/rooms/:roomCode/state', (req, res) => {
-  const { roomCode } = req.params;
-  const { state } = req.body;
-
-  if (!rooms.has(roomCode)) {
-    rooms.set(roomCode, {
-      state,
-      users: new Map(),
-      matches: [],
-      createdAt: new Date().toISOString()
-    });
-  } else {
-    rooms.get(roomCode).state = state;
-  }
-
-  broadcastToRoom(roomCode, {
-    type: 'state',
-    state
-  });
-
-  saveData();
-  res.json({ success: true });
-});
-
-app.post('/api/rooms/:roomCode/matches', (req, res) => {
-  const { roomCode } = req.params;
-  const { title, state, scores } = req.body;
-
-  if (!rooms.has(roomCode)) {
-    rooms.set(roomCode, {
-      state,
-      users: new Map(),
-      matches: [],
-      createdAt: new Date().toISOString()
-    });
-  }
-
-  const match = {
-    id: Date.now(),
-    timestamp: new Date().toISOString(),
-    state,
-    title: title || `比赛 ${rooms.get(roomCode).matches.length + 1}`,
-    scores: scores || {}
-  };
-
-  const room = rooms.get(roomCode);
-  room.matches.push(match);
-
-  // 保存到历史文件
-  const historyFile = path.join(historyDir, `${roomCode}_${match.id}.json`);
-  fs.writeFileSync(historyFile, JSON.stringify(match, null, 2));
-
-  broadcastToRoom(roomCode, {
-    type: 'match-saved',
-    match
-  });
-
-  saveData();
-  res.json(match);
-});
-
-app.get('/api/rooms/:roomCode/matches', (req, res) => {
-  const { roomCode } = req.params;
-  const room = rooms.get(roomCode);
-  if (room) {
-    res.json(room.matches);
-  } else {
-    res.json([]);
-  }
-});
-
-app.get('/api/rooms/:roomCode/matches/:matchId', (req, res) => {
-  const { roomCode, matchId } = req.params;
-  const room = rooms.get(roomCode);
-  if (room) {
-    const match = room.matches.find(m => m.id === parseInt(matchId));
-    if (match) {
-      res.json(match);
-    } else {
-      res.status(404).json({ error: '比赛不存在' });
-    }
-  } else {
-    res.status(404).json({ error: '房间不存在' });
-  }
-});
-
-app.delete('/api/rooms/:roomCode/matches/:matchId', (req, res) => {
-  const { roomCode, matchId } = req.params;
-  const room = rooms.get(roomCode);
-  if (room) {
-    const index = room.matches.findIndex(m => m.id === parseInt(matchId));
-    if (index !== -1) {
-      const match = room.matches.splice(index, 1)[0];
-      
-      // 删除历史文���
-      const historyFile = path.join(historyDir, `${roomCode}_${match.id}.json`);
-      if (fs.existsSync(historyFile)) {
-        fs.unlinkSync(historyFile);
-      }
-
-      broadcastToRoom(roomCode, {
-        type: 'match-deleted',
-        matchId: parseInt(matchId)
-      });
-
-      saveData();
-      res.json({ success: true });
-    } else {
-      res.status(404).json({ error: '比赛不存在' });
-    }
-  } else {
-    res.status(404).json({ error: '房间不存在' });
-  }
-});
-
-// 健康检查
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// 加载数据
-loadData();
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🚀 服务器运行在 http://localhost:${PORT}`);
-  console.log(`📡 WebSocket 服务在 ws://localhost:${PORT}`);
-  console.log(`📊 数据目录: ${dataDir}`);
-});
+loadRooms();
+server.listen(PORT, () => console.log(`PUBG scoreboard listening on :${PORT}`));

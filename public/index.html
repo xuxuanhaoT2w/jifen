@@ -134,6 +134,7 @@
 </div>
 
 <script>
+if (false) {
 // 配置 - 根据环境自动选择协议
 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 const wsUrl = protocol + '//' + window.location.host;
@@ -468,6 +469,8 @@ document.getElementById('copyCode').onclick = async () => {
     alert('复制失败，请手动复制房间号：' + roomCode);
   }
 };
+}
 </script>
+<script src="/app.js"></script>
 </body>
 </html>

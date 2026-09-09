@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: pubg-scoreboard
+    runtime: docker
+    healthCheckPath: /health
+    disk:
+      name: scoreboard-data
+      mountPath: /app/data
+      sizeGB: 1
