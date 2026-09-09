@@ -134,8 +134,9 @@
 </div>
 
 <script>
-// 配置
-const API_URL = 'https://jifen-api.herokuapp.com'; // 需要部署后端
+// 配置 - 根据环境自动选择协议
+const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const wsUrl = protocol + '//' + window.location.host;
 const OPTIONS = ['JBM', 'JBH', 'JBS', 'ZZZ', 'JJG', 'XC', '小卷卷', 'JBB'];
 const ROOM_CODE_LENGTH = 6;
 
@@ -153,6 +154,8 @@ let isConnected = false;
 let wsConnection = null;
 let lastSyncTime = 0;
 const SYNC_INTERVAL = 500; // 防抖延迟
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 // 初始化
 init();
@@ -182,20 +185,92 @@ async function init() {
   // 更新 URL
   window.history.replaceState({}, '', `?room=${roomCode}`);
   
+  // 加载本地数据（备用）
+  loadLocalData();
+  
   // 连接 WebSocket
   connectWebSocket();
   
-  // 加载本地数据（备用）
-  loadLocalData();
   render();
 }
 
 function connectWebSocket() {
-  // 使用 WebSocket 连接到服务器（如果有服务器）
-  // 对于演示版本，我们使用本地存储
-  updateConnectionStatus('connected');
+  updateConnectionStatus('connecting');
   
-  // 模拟 WebSocket 消息处理
+  try {
+    wsConnection = new WebSocket(wsUrl);
+    
+    wsConnection.onopen = () => {
+      console.log('WebSocket 已连接');
+      reconnectAttempts = 0;
+      updateConnectionStatus('connected');
+      
+      // 发送加入房间消息
+      wsConnection.send(JSON.stringify({
+        type: 'join',
+        roomCode,
+        userId,
+        userName
+      }));
+    };
+    
+    wsConnection.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        handleMessage(msg);
+      } catch (e) {
+        console.error('消息解析错误:', e);
+      }
+    };
+    
+    wsConnection.onerror = (error) => {
+      console.error('WebSocket 错误:', error);
+      updateConnectionStatus('disconnected');
+    };
+    
+    wsConnection.onclose = () => {
+      console.log('WebSocket 已断开');
+      updateConnectionStatus('disconnected');
+      
+      // 尝试重新连接
+      if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        reconnectAttempts++;
+        console.log(`尝试重新连接... (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+        setTimeout(connectWebSocket, 3000 * reconnectAttempts);
+      }
+    };
+  } catch (e) {
+    console.error('WebSocket 连接失败:', e);
+    updateConnectionStatus('disconnected');
+    
+    // 如果无法连接到服务器，使用本地存储模式
+    console.log('使用本地存储模式进行数据同步');
+    updateConnectionStatus('connected');
+    setupLocalStorageSync();
+  }
+}
+
+function handleMessage(msg) {
+  if (msg.type === 'state') {
+    state = msg.state;
+    render();
+  } else if (msg.type === 'user-joined') {
+    console.log(`${msg.userName} 加入了房间`);
+    render();
+  } else if (msg.type === 'user-left') {
+    console.log(`${msg.userName} 离开了房间`);
+    render();
+  } else if (msg.type === 'users') {
+    users = {};
+    msg.users.forEach(u => {
+      users[u.id] = u.name;
+    });
+    render();
+  }
+}
+
+function setupLocalStorageSync() {
+  // 监听其他标签页的存储变化
   window.addEventListener('storage', (e) => {
     if (e.key === `pubg-state-${roomCode}`) {
       state = JSON.parse(e.newValue || '{}');
@@ -229,25 +304,20 @@ function loadLocalData() {
 }
 
 function saveState() {
+  // 保存到本地存储（备用）
   localStorage.setItem(`pubg-state-${roomCode}`, JSON.stringify(state));
   
-  // 防抖上传到服务器
-  if (Date.now() - lastSyncTime > SYNC_INTERVAL) {
-    syncToServer();
-    lastSyncTime = Date.now();
-  }
-}
-
-async function syncToServer() {
-  // 这里可以集成真实的后端 API
-  try {
-    // await fetch(`${API_URL}/api/rooms/${roomCode}/state`, {
-    //   method: 'PUT',
-    //   headers: { 'Content-Type': 'application/json' },
-    //   body: JSON.stringify({ state, userId, userName, timestamp: Date.now() })
-    // });
-  } catch (e) {
-    console.error('同步失败', e);
+  // 通过 WebSocket 发送到服务器
+  if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+    if (Date.now() - lastSyncTime > SYNC_INTERVAL) {
+      wsConnection.send(JSON.stringify({
+        type: 'update',
+        state,
+        userId,
+        timestamp: Date.now()
+      }));
+      lastSyncTime = Date.now();
+    }
   }
 }
 
@@ -308,23 +378,39 @@ function renderRounds() {
     <td class="chicken-cell"><details><summary>${r.chicken.length ? esc(r.chicken.join('、')) : '请选择'}</summary>
       <div class="multi-menu">${state.players.map(p => `<label><input type="checkbox" data-chicken="${ri}" value="${esc(p)}" ${r.chicken.includes(p) ? 'checked' : ''}>${esc(p)}</label>`).join('')}</div>
     </details></td>
-    ${state.players.map((_, i) => `<td class="round-score ${r.kills.some(x => x === '') ? 'empty' : roundScore(r, i) > 0 ? 'positive' : roundScore(r, i) < 0 ? 'negative' : ''}">${r.kills.some(x => x === '') ? '—' : (roundScore(r, i) > 0 ? '+' : '') + roundScore(r, i)}</td>`).join('')}
+    ${state.players.map((_, i) => `<td class="round-score ${r.kills.some(x => x === '') ? 'empty' : roundScore(r, i) > 0 ? 'positive' : roundScore(r, i) < 0 ? 'negative' : ''}">${r.kills.some(x => x === '') ? '-' : roundScore(r, i) > 0 ? '+' + roundScore(r, i) : roundScore(r, i)}</td>`).join('')}
   </tr>`).join('');
   
   bindEvents();
 }
 
 function renderUsersList() {
-  // 简化版：显示当前用户
-  document.getElementById('usersList').innerHTML = `
-    <div class="user-item active">
+  const userItems = [
+    `<div class="user-item active">
       <div class="user-avatar">${userName.charAt(0)}</div>
       <div class="user-info">
         <span class="user-name">${userName} (你)</span>
         <span class="user-status"><span class="status-indicator status-online"></span> 在线</span>
       </div>
-    </div>
-  `;
+    </div>`
+  ];
+  
+  // 显示其他在线用户
+  Object.entries(users).forEach(([id, name]) => {
+    if (id !== userId) {
+      userItems.push(`
+        <div class="user-item">
+          <div class="user-avatar">${name.charAt(0)}</div>
+          <div class="user-info">
+            <span class="user-name">${name}</span>
+            <span class="user-status"><span class="status-indicator status-online"></span> 在线</span>
+          </div>
+        </div>
+      `);
+    }
+  });
+  
+  document.getElementById('usersList').innerHTML = userItems.join('');
 }
 
 function bindEvents() {
