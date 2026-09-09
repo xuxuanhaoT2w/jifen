@@ -14,13 +14,15 @@ function ready() {
   if (joined !== 2) return;
   setTimeout(() => first.send(JSON.stringify({ type: 'operation', operation: { type: 'set-kill', roundIndex: 0, playerIndex: 0, value: '4' } })), 40);
   setTimeout(() => second.send(JSON.stringify({ type: 'operation', operation: { type: 'set-kill', roundIndex: 0, playerIndex: 1, value: '3' } })), 80);
+  setTimeout(() => first.send(JSON.stringify({ type: 'operation', operation: { type: 'finish-match' } })), 140);
   setTimeout(() => {
-    const kills = latest && latest.state.rounds[0].kills;
-    if (!kills || kills[0] !== '4' || kills[1] !== '3') {
+    const kills = latest && latest.matches && latest.matches[0] && latest.matches[0].state.rounds[0].kills;
+    const activeKills = latest && latest.state.rounds[0].kills;
+    if (!kills || kills[0] !== '4' || kills[1] !== '3' || activeKills.some(Boolean)) {
       console.error('同步失败:', JSON.stringify(latest));
       process.exitCode = 1;
     } else {
-      console.log('实时多人同步验证通过:', kills.join(','));
+      console.log('实时多人、场次保存与历史验证通过:', kills.join(','));
     }
     clearTimeout(timeout);
     first.close(); second.close();

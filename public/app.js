@@ -7,6 +7,7 @@ let socket, connected = false, reconnectDelay = 500;
 const userId = localStorage.getItem('pubg-user-id') || crypto.randomUUID();
 const userName = localStorage.getItem('pubg-user-name') || `访客${Math.floor(Math.random() * 900 + 100)}`;
 let users = [];
+let matches = [];
 localStorage.setItem('pubg-user-id', userId);
 localStorage.setItem('pubg-user-name', userName);
 history.replaceState({}, '', `?room=${roomCode}`);
@@ -18,14 +19,14 @@ function connect() {
   setStatus('connecting');
   socket = new WebSocket(wsUrl);
   socket.onopen = () => { connected = true; reconnectDelay = 500; setStatus('connected'); socket.send(JSON.stringify({ type:'join', roomCode, userId, userName })); };
-  socket.onmessage = event => { const message = JSON.parse(event.data); if (message.type === 'state') { state = message.state; users = message.users || users; render(); } else if (message.type === 'users') { users = message.users; renderUsers(); } else if (message.type === 'error') alert(message.message); };
+  socket.onmessage = event => { const message = JSON.parse(event.data); if (message.type === 'state') { state = message.state; matches = message.matches || matches; users = message.users || users; render(); } else if (message.type === 'users') { users = message.users; renderUsers(); } else if (message.type === 'error') alert(message.message); };
   socket.onclose = () => { connected = false; setStatus('disconnected'); setTimeout(connect, reconnectDelay); reconnectDelay = Math.min(reconnectDelay * 2, 8000); };
   socket.onerror = () => socket.close();
 }
 function operation(payload) { if (!connected) return alert('连接尚未建立，请稍后重试。'); socket.send(JSON.stringify({ type:'operation', operation:payload })); }
 function roundScore(round, index) { if (round.kills.some(value => value === '')) return 0; const kills = round.kills.map(Number); const chickens = round.chicken.length; const headScore = 4 * kills[index] - kills.reduce((total, value) => total + value, 0); const chickenScore = chickens ? (round.chicken.includes(state.players[index]) ? 5 * (4 - chickens) : -5 * chickens) : 0; return headScore + chickenScore; }
 function total(index) { return state.rounds.reduce((sum, round) => sum + roundScore(round, index), 0); }
-function render() { renderPlayers(); renderScores(); renderRounds(); renderUsers(); }
+function render() { renderPlayers(); renderScores(); renderRounds(); renderUsers(); renderHistory(); }
 function renderPlayers() { document.getElementById('players').innerHTML = state.players.map((player, index) => `<div class="player-name"><label>玩家 ${index + 1}</label><select data-player="${index}">${OPTIONS.map(option => `<option${option === player ? ' selected' : ''}>${option}</option>`).join('')}</select></div>`).join(''); }
 function renderScores() { const totals = state.players.map((_, index) => total(index)); const lowest = Math.min(...totals); const worst = lowest < 0 ? totals.map((value, index) => value === lowest ? index : -1).filter(index => index >= 0) : []; document.getElementById('scores').innerHTML = state.players.map((player, index) => `<div class="score ${totals[index] > 0 ? 'positive' : totals[index] < 0 ? 'negative' : ''} ${worst.includes(index) ? 'worst' : ''}"><div class="name">${esc(player)}${worst.includes(index) ? ' · 当前负分最多' : ''}</div><div class="value">${totals[index] > 0 ? '+' : ''}${totals[index]}</div></div>`).join(''); }
 function renderRounds() {
@@ -36,8 +37,11 @@ function renderRounds() {
   document.querySelectorAll('[data-chicken]').forEach(element => element.onchange = () => { const roundIndex = Number(element.dataset.chicken); const players = [...document.querySelectorAll(`[data-chicken="${roundIndex}"]:checked`)].map(item => item.value); operation({ type:'set-chicken', roundIndex, players }); });
 }
 function renderUsers() { document.getElementById('usersList').innerHTML = users.map(user => `<div class="user-item ${user.id === userId ? 'active' : ''}"><div class="user-avatar">${esc(user.name.charAt(0))}</div><div class="user-info"><span class="user-name">${esc(user.name)}${user.id === userId ? '（你）' : ''}</span><span class="user-status"><span class="status-indicator status-online"></span> 在线</span></div></div>`).join(''); }
+function scoreForState(matchState, index) { return matchState.rounds.reduce((sum, round) => { if (round.kills.some(value => value === '')) return sum; const kills = round.kills.map(Number); const chickenCount = round.chicken.length; const head = 4 * kills[index] - kills.reduce((total, value) => total + value, 0); const chicken = chickenCount ? (round.chicken.includes(matchState.players[index]) ? 5 * (4 - chickenCount) : -5 * chickenCount) : 0; return sum + head + chicken; }, 0); }
+function renderHistory() { const target = document.getElementById('historyList'); if (!matches.length) { target.innerHTML = '<div class="history-empty">暂无已结束场次</div>'; return; } target.innerHTML = matches.slice().reverse().map(match => { const time = new Date(match.timestamp).toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }); const scores = match.state.players.map((player, index) => `${esc(player)} ${scoreForState(match.state, index) > 0 ? '+' : ''}${scoreForState(match.state, index)}`).join(' · '); return `<div class="history-item"><strong>${esc(match.title)}</strong><small>${time} · ${match.state.rounds.length} 局</small><div class="history-scores">${scores}</div></div>`; }).join(''); }
 document.getElementById('roomCode').textContent = roomCode;
 document.getElementById('addRound').onclick = () => operation({ type:'add-round' });
+document.getElementById('finishMatch').onclick = () => { if (confirm('结束当前场次并保存到历史记录？所有协作者将开始一张新的记分表。')) operation({ type:'finish-match' }); };
 document.getElementById('reset').onclick = () => { if (confirm('确定清空当前房间的所有局数和得分吗？所有在线协作者都会看到清零结果。')) operation({ type:'reset' }); };
 document.getElementById('copyCode').onclick = async () => { const link = `${location.origin}${location.pathname}?room=${roomCode}`; try { await navigator.clipboard.writeText(link); const button = document.getElementById('copyCode'); button.textContent = '已复制房间链接！'; setTimeout(() => button.textContent = '复制房间号', 1800); } catch { prompt('复制此房间链接：', link); } };
 render(); connect();
