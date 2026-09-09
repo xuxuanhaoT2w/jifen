@@ -2,6 +2,8 @@
 
 四位玩家的人头差额与吃鸡分数自动结算的实时协作网页。打开同一房间链接的所有用户会立即看到彼此的修改。
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/xuxuanhaoT2w/jifen)
+
 ## 多人协作方式
 
 - 首次打开会生成房间号；点击“复制房间号”分享完整链接。
